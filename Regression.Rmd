@@ -1,0 +1,315 @@
+---
+title: "GLM Modeling & Reguarlization"
+author: "Weiling Li, Haozhe Chen"
+date: "4/20/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+source("preprocessing.R")
+library(lme4)
+library(glmnet)
+library(caret)
+```
+
+## Regular GLM
+The residual shows a clear need to transform our response refit
+```{r echo=F}
+## Preprocess Training & Testing Data
+set.seed(2020)
+test_index <- sample(x = 1:nrow(md_data_new_1) , size = floor(0.2 * nrow(md_data_new_1)),replace = F)
+
+## change outcome ct into categorical
+md_data_new_1 %<>% mutate(outcome_ct = factor(outcome_ct))
+
+# Train test for regular lm model
+train <- md_data_new_1[-test_index, 2:ncol(md_data_new_1)]
+test <- md_data_new_1[test_index, 2:ncol(md_data_new_1)]
+
+train_tot <- train[ , colnames(train) != "expected_tot"]
+train_exp <- train[ , colnames(train) != "total"]
+# Train test for a numeric input model
+
+lm_total <- lm(data = train_tot, formula =total ~. )
+summary(lm_total)
+par(mfrow = c(1,2))
+plot(lm_total,which = 2)
+# car::crPlots(model = lm_total)
+
+train_RMSE <- sqrt(mean(residuals(lm_total)^2))
+train_MAE <- mean(abs(residuals(lm_total)))
+
+test_RMSE <- sqrt(mean((predict(lm_total,test) - test$total)^2))
+test_MAE <- mean(abs(predict(lm_total,test) - test$total))
+
+lm_exp <- lm(data = train_exp, formula =expected_tot ~. )
+summary(lm_exp)
+plot(lm_exp,which = 2)
+# car::crPlots(model = lm_exp)
+
+train_RMSE_0 <- sqrt(mean(residuals(lm_exp)^2))
+train_MAE_0 <- mean(abs(residuals(lm_exp)))
+
+test_RMSE_0 <- sqrt(mean((predict(lm_exp,test) - test$expected_tot)^2))
+test_MAE_0 <- mean(abs(predict(lm_exp,test) - test$expected_tot))
+
+# summary(fitted(lm_exp))
+```
+
+After transfomation
+The models of total and expected total
+```{r echo=F}
+md_data_new_1_1 <- md_data_new_1 %>% mutate(total = log(total),
+                          expected_tot = log(expected_tot))
+
+train <- md_data_new_1_1[-test_index, 2:ncol(md_data_new_1_1)]
+test <- md_data_new_1_1[test_index, 2:ncol(md_data_new_1_1)]
+
+train_tot <- train[ , colnames(train) != "expected_tot"]
+train_exp <- train[ , colnames(train) != "total"]
+
+lm_total <- lm(data = train_tot, formula = total ~. )
+summary(lm_total)
+#plot(lm_total,which = 1)
+#plot(lm_total,which = 2)
+#plot(lm_total,which = 3)
+#plot(lm_total,which = 6)
+#car::crPlots(model = lm_total)
+
+train_RMSE_1 <- sqrt(mean((exp(fitted(lm_total))-exp(train_tot$total))^2))
+train_MAE_1 <- mean(abs(exp(fitted(lm_total))-exp(train_tot$total)))
+
+test_RMSE_1 <- sqrt(mean((exp(predict(lm_total,test)) - exp(test$total))^2))
+test_MAE_1 <- mean(abs(exp(predict(lm_total,test)) - exp(test$total)))
+# summary(exp(test$total))
+
+lm_exp <- lm(data = train_exp, formula = expected_tot ~. )
+summary(lm_exp)
+#plot(lm_exp,which = 1)
+#plot(lm_exp,which = 2)
+#plot(lm_exp,which = 3)
+#plot(lm_exp,which = 6)
+# car::crPlots(model = lm_exp)
+
+train_RMSE_2 <- sqrt(mean((exp(fitted(lm_exp))-exp(train_exp$expected_tot))^2))
+train_MAE_2 <- mean(abs(exp(fitted(lm_exp))-exp(train_exp$expected_tot)))
+
+test_RMSE_2 <- sqrt(mean((exp(predict(lm_exp,test)) - exp(test$expected_tot))^2))
+test_MAE_2 <- mean(abs(exp(predict(lm_exp,test)) - exp(test$expected_tot)))
+
+#hist(exp(predict(lm_exp,test)),breaks = 100)
+#hist(exp(test$expected_tot),breaks = 100)
+
+#plot(x = exp(test$expected_tot),y = exp(predict(lm_exp,test)),"p")
+
+#plot(test$weeks_to_treat_cat,exp(test$expected_tot))
+```
+
+Results for regular GLM
+```{r}
+
+RMSE_glm <- c(test_RMSE,test_RMSE_0,test_RMSE_1, test_RMSE_2)
+MAE_glm <- c(test_MAE,test_MAE_1,test_MAE_1 ,test_MAE_2)
+result_glm <- rbind(RMSE_glm, MAE_glm) 
+colnames(result_glm) <- c('GLM Total', 'GLM Expected Total', 'GLM Total(log)', 'GLM Expected Total(log)')
+rownames(result_glm) <- c('RMSE', 'MAE')
+kable(result_glm,booktabs = T,align = "c")%>%kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+
+## Reguarlization
+- Get the data into a compatible matrix format
+- Predict the total cost 
+- Predict the expect total cost
+
+### Get the data into a compatible matrix format
+```{r}
+
+bd_region <- dummy(md_data_new_1_1$body_region)
+surgical <- dummy(md_data_new_1_1$Surgical)
+payer <- dummy(md_data_new_1_1$PayerCategory)
+weeks_to_treat <- dummy(md_data_new_1_1$weeks_to_treat_cat)
+outcomect <- dummy(md_data_new_1_1$outcome_ct)
+md_data_m <- md_data_new_1_1 %>% dplyr::select(-body_region, -Surgical, -PayerCategory, -weeks_to_treat_cat, -outcome_ct, - `ROMS ID`)
+md_data_m <- cbind(md_data_m, bd_region, surgical, payer, weeks_to_treat, outcomect)
+rm(bd_region, surgical, payer, weeks_to_treat, outcomect)
+
+train_m <- md_data_m[-test_index, ] 
+test_m <- md_data_m[test_index, ]
+# the default cats here are 
+# body_region: cervical
+# Surgical: conservative
+# PayerCategory: Aetna
+# weeks_to_treat_cat: <2weeks
+# outcome_ct: 1
+
+X_train <- train_m %>% dplyr::select(-expected_tot,-total) %>% as.matrix()
+Y_train <- train_m %>% dplyr::select(total) %>% as.matrix()
+
+X_train_1 <- train_m %>% dplyr::select(-expected_tot,-total) %>% as.matrix()
+Y_train_1 <- train_m %>% dplyr::select(expected_tot) %>% as.matrix()
+
+X_test <- test_m %>% dplyr::select(-expected_tot,-total) %>% as.matrix()
+Y_test <- test_m %>% dplyr::select(total) %>% as.matrix()
+
+X_test_1 <- test_m %>% dplyr::select(-expected_tot,-total) %>% as.matrix()
+Y_test_1 <- test_m %>% dplyr::select(expected_tot) %>% as.matrix()
+
+```
+
+### Predict the total cost and check the metric
+```{r include=F}
+# Hyper-parameter Tuning
+# Choosing a lambda for Lasso Regression
+# The alpha value is 1 for lasso regression
+cv_lasso <- cv.glmnet(X_train, Y_train, alpha = 1, type.measure = "mse", nfolds = 5)
+plot(cv_lasso)
+plot(cv_lasso$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_lasso$lambda.min)
+coef(cv_lasso)
+
+# Choosing a lambda for Ridge Regression
+# The alpha value is 0 for ridge regression
+cv_ridge <- cv.glmnet(X_train, Y_train, alpha = 0, type.measure = "mse", nfolds = 5)
+plot(cv_ridge)
+plot(cv_ridge$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_ridge$lambda.min)
+coef(cv_ridge)
+
+# Building Model based on optimal lambda
+# By using the optimal lambda values obtained above, we can build our ridge and lasso models
+
+lasso_model_tot <- glmnet(X_train, Y_train, lambda = cv_lasso$lambda.min, alpha = 1)
+coef(lasso_model_tot)
+
+preds_lasso_train <- predict(lasso_model_tot, X_train)
+preds_lasso_test <- predict(lasso_model_tot, X_test)
+
+train_RMSE_lasso <- sqrt(mean((exp(preds_lasso_train)-exp(train_m$total))^2))
+train_MAE_lasso <- mean(abs(exp(preds_lasso_train)-exp(train_m$total)))
+
+test_RMSE_lasso <- sqrt(mean((exp(preds_lasso_test) - exp(test_m$total))^2))
+test_MAE_lasso <- mean(abs(exp(preds_lasso_test) - exp(test_m$total)))
+
+
+ridge_model_tot <- glmnet(X_train, Y_train, lambda = cv_ridge$lambda.min, alpha = 0)
+coef(ridge_model_tot)
+
+preds_ridge_train <- predict(ridge_model_tot, X_train)
+preds_ridge_test <- predict(ridge_model_tot, X_test)
+
+train_RMSE_ridge <- sqrt(mean((exp(preds_ridge_train)-exp(train_m$total))^2))
+train_MAE_rideg <- mean(abs(exp(preds_ridge_train)-exp(train_m$total)))
+
+test_RMSE_ridge <- sqrt(mean((exp(preds_ridge_test) - exp(test_m$total))^2))
+test_MAE_ridge <- mean(abs(exp(preds_ridge_test) - exp(test_m$total)))
+
+```
+
+Lasso & Ridge cofficients for total
+```{r echo=F}
+coef(lasso_model_tot)
+coef(ridge_model_tot)
+```
+
+### Predict the expected cost and check the metric
+```{r include=F}
+# Hyper-parameter Tuning
+# Choosing a lambda for Lasso Regression
+# The alpha value is 1 for lasso regression
+cv_lasso <- cv.glmnet(X_train_1, Y_train_1, alpha = 1, type.measure = "mse", nfolds = 5)
+plot(cv_lasso)
+plot(cv_lasso$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_lasso$lambda.min)
+coef(cv_lasso)
+
+# Choosing a lambda for Ridge Regression
+# The alpha value is 0 for ridge regression
+cv_ridge <- cv.glmnet(X_train_1, Y_train_1, alpha = 0, type.measure = "mse", nfolds = 5)
+plot(cv_ridge)
+plot(cv_ridge$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_ridge$lambda.min)
+coef(cv_ridge)
+
+# Building Model based on optimal lambda
+# By using the optimal lambda values obtained above, we can build our ridge and lasso models
+
+lasso_model_exp <- glmnet(X_train_1, Y_train_1, lambda = cv_lasso$lambda.min, alpha = 1)
+coef(lasso_model_exp)
+
+preds_lasso_train <- predict(lasso_model_exp, X_train_1)
+preds_lasso_test <- predict(lasso_model_exp, X_test_1)
+
+train_RMSE_lasso1 <- sqrt(mean((exp(preds_lasso_train)-exp(train_m$expected_tot))^2))
+train_MAE_lasso1 <- mean(abs(exp(preds_lasso_train)-exp(train_m$expected_tot)))
+
+test_RMSE_lasso1 <- sqrt(mean((exp(preds_lasso_test) - exp(test_m$expected_tot))^2))
+test_MAE_lasso1 <- mean(abs(exp(preds_lasso_test) - exp(test_m$expected_tot)))
+
+
+ridge_model_exp <- glmnet(X_train_1, Y_train_1, lambda = cv_ridge$lambda.min, alpha = 0)
+coef(ridge_model_exp)
+
+preds_ridge_train <- predict(ridge_model_exp, X_train_1)
+preds_ridge_test <- predict(ridge_model_exp, X_test_1)
+
+train_RMSE_ridge1 <- sqrt(mean((exp(preds_ridge_train)-exp(train_m$expected_tot))^2))
+train_MAE_rideg1 <- mean(abs(exp(preds_ridge_train)-exp(train_m$expected_tot)))
+
+test_RMSE_ridge1 <- sqrt(mean((exp(preds_ridge_test) - exp(test_m$expected_tot))^2))
+test_MAE_ridge1 <- mean(abs(exp(preds_ridge_test) - exp(test_m$expected_tot)))
+
+```
+
+Lasso & Ridge cofficients for expected total
+```{r echo=F}
+coef(lasso_model_exp)
+coef(ridge_model_exp)
+```
+
+
+Results of regularizations
+```{r echo=F}
+RMSE_regl <- c(test_RMSE_ridge,test_RMSE_lasso,test_RMSE_ridge1,test_RMSE_lasso1)
+MAE_regl <- c(test_MAE_ridge,test_MAE_lasso,test_MAE_ridge1,test_MAE_lasso1)
+result_regl <- rbind(RMSE_regl, MAE_regl)
+colnames(result_regl) <- c('Rigde Total', 'Lasso Total', 'Rigde Expected Total', 'Lasso Expected Total')
+rownames(result_regl) <- c('RMSE','MAE')
+kable(result_regl,booktabs = T,align = "c")%>%kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+
+## Results for Regressions
+Total cost
+```{r echo=F}
+result_regression_total <- cbind(
+result_glm[,c(1,3)],
+result_regl[,c(1,2)])
+kable(result_regression_total,booktabs = T,align = "c")%>%kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+write_csv(data.frame(result_regression_total),'result_regression_total.csv')
+```
+
+Expected total cost
+```{r echo=F}
+result_regression_exptot <- cbind(
+result_glm[,c(2,4)],
+result_regl[,c(3,4)])
+kable(result_regression_exptot,booktabs = T,align = "c")%>%kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+write_csv(data.frame(result_regression_exptot),'result_regression_exptot.csv')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

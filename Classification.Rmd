@@ -1,0 +1,657 @@
+---
+title: "Classification"
+author: "Haozhe Chen"
+date: "4/23/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+source("preprocessing1.R")
+pacman::p_load(MASS,caret,glmnet,lme4,kableExtra)
+```
+
+```{r include=F}
+# hist(md_data_new_1$total)
+# hist(md_data_new_1$expected_tot)
+# convert total and exptot into ordinal categories, store as md_data_new_2
+
+md_data_new_2<- md_data_new_1 %>% 
+  dplyr::mutate(total_cat = 
+           dplyr::if_else(total < 500,
+                                            "total<500",
+                                             dplyr::if_else(total < 2000,
+                                                            "500<total<2000",
+                                                                     "total>2000"))) %>% 
+  dplyr::select(-total) %>%
+  dplyr::mutate(exptot_cat = 
+           dplyr::if_else(expected_tot < 500,
+                                            "exptot<500",
+                                             dplyr::if_else(expected_tot < 1000,
+                                                            "500<exptot<1000",
+                                                                     "exptot>1000"))) %>% 
+  dplyr::select(-expected_tot)
+  
+
+md_data_new_2 %<>% 
+  dplyr::mutate(total_cat = factor(total_cat,
+                                   levels = c("total<500","500<total<2000","total>2000"))) %<>%
+  dplyr::mutate(exptot_cat = factor(exptot_cat,
+                                   levels = c("exptot<500","500<exptot<1000","exptot>1000"))) 
+
+# Data preparation
+bd_region <- dummy(md_data_new_2$body_region)
+surgical <- dummy(md_data_new_2$Surgical)
+payer <- dummy(md_data_new_2$PayerCategory)
+weeks_to_treat <- dummy(md_data_new_2$weeks_to_treat_cat)
+weeks_to_smsend <- dummy(md_data_new_2$weeks_to_smsend_cat)
+outcomect <- dummy(md_data_new_2$outcome_ct)
+md_data_2_m <- md_data_new_2 %>% dplyr::select(-body_region, -Surgical, -PayerCategory, -weeks_to_treat_cat,
+                                     -weeks_to_smsend_cat, -outcome_ct, -int_sur_payer)
+md_data_2_m <- cbind(md_data_2_m, bd_region, surgical, payer, weeks_to_treat, weeks_to_smsend, outcomect)
+rm(bd_region, surgical, payer, weeks_to_treat, weeks_to_smsend, outcomect)
+
+#Data partition
+set.seed(2020)
+
+ind <- sample(2, nrow(md_data_2_m), replace = TRUE, prob = c(.8,.2))
+
+train <- md_data_2_m[ind==1, ]
+test <- md_data_2_m[ind==2, ]
+
+# dim(train)
+# train 1, test 1 are used for predicting total 
+# train 2, test 2 are used for predicting expect total
+train1 <- train %>% dplyr::select(-`ROMS ID`, -exptot_cat)
+test1 <- test %>% dplyr::select(-`ROMS ID`, -exptot_cat)
+train2 <- train %>% dplyr::select(-`ROMS ID`, -total_cat)
+test2 <- test %>% dplyr::select(-`ROMS ID`, -total_cat)
+
+# X1, X2 are used for prediction
+X1_train <- train1 %>% dplyr::select(-total_cat)
+X1_test <- test1 %>% dplyr::select(-total_cat)
+X2_train <- train2 %>% dplyr::select(-exptot_cat)
+X2_test <- test2 %>% dplyr::select(-exptot_cat)
+
+```
+
+### Ordinal categorical regression
+Model coefficients of total 
+```{r echo=F}
+
+fit_total <- polr(total_cat ~ ., train1, Hess = T)
+summary(fit_total)
+# for the baseline feature, the odd ratio of total > 500 is exp(0.197)
+# the odd ratio of total > 1000 is exp(1.4)
+
+p1_train <- predict(fit_total, X1_train)
+p1_test <- predict(fit_total, X1_test)
+
+confus_m_train <- table(p1_train,train1$total_cat)
+confus_m_test <- table(p1_test,test1$total_cat)
+
+# accuracy of classification on training set 
+sum(diag(confus_m_train))/sum(confus_m_train)
+
+# accuracy of classification on testing set
+sum(diag(confus_m_test))/sum(confus_m_test)
+
+```
+
+Model coefficients of exptot
+```{r}
+fit_exp <- polr(exptot_cat ~ ., train2, Hess = T)
+summary(fit_exp)
+# for the baseline feature, the odd ratio of expected total > 500 is exp(-0.2)
+# the odd ratio of expected total > 1000 is exp(1.6)
+
+p2_train <- predict(fit_exp, X2_train)
+p2_test <- predict(fit_exp, X2_test)
+
+confus_m_train <- table(p2_train,train2$exptot_cat)
+confus_m_test <- table(p2_test,test2$exptot_cat)
+
+# accuracy of classification on training set 
+sum(diag(confus_m_train))/sum(confus_m_train)
+
+# accuracy of classification on testing set
+sum(diag(confus_m_test))/sum(confus_m_test)
+
+```
+
+## Change three categories to two categories
+```{r include=F}
+md_data_new_3 <- md_data_new_1 %>% 
+  dplyr::mutate(total_cat = 
+           dplyr::if_else(total < 1200, "total<1200", "total>1200")) %>% 
+  dplyr::select(-total) %>%
+  dplyr::mutate(exptot_cat = 
+           dplyr::if_else(expected_tot < 650, "expected_tot<650", "expected_tot>650")) %>% 
+  dplyr::select(-expected_tot)
+  
+md_data_new_3 %<>% 
+  dplyr::mutate(total_cat = factor(total_cat,
+                                   levels = c("total<1200", "total>1200"))) %<>%
+  dplyr::mutate(exptot_cat = factor(exptot_cat,
+                                   levels = c("expected_tot<650", "expected_tot>650")))
+
+# Data preparation
+bd_region <- dummy(md_data_new_3$body_region)
+surgical <- dummy(md_data_new_3$Surgical)
+payer <- dummy(md_data_new_3$PayerCategory)
+weeks_to_treat <- dummy(md_data_new_3$weeks_to_treat_cat)
+weeks_to_smsend <- dummy(md_data_new_3$weeks_to_smsend_cat)
+outcomect <- dummy(md_data_new_3$outcome_ct)
+md_data_3_m <- md_data_new_3 %>% dplyr::select(-body_region, -Surgical, -PayerCategory, -weeks_to_treat_cat,
+                                     -weeks_to_smsend_cat, -outcome_ct, -int_sur_payer)
+md_data_3_m <- cbind(md_data_3_m, bd_region, surgical, payer, weeks_to_treat, weeks_to_smsend, outcomect)
+rm(bd_region, surgical, payer, weeks_to_treat, weeks_to_smsend, outcomect)
+
+md_data_3_m.1 <- md_data_3_m %>% dplyr::select(-`ROMS ID`, -exptot_cat) # predict total
+md_data_3_m.2 <- md_data_3_m %>% dplyr::select(-`ROMS ID`, -total_cat) # predict exp_tot
+
+```
+
+## Comparing logistic regression, LDA, QDA
+- Build R function for K-fold Cross-Validated error for logistic regression
+```{r}
+cv.logistic <-
+  function (df, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020) {
+    
+    # Arguments:
+    # df --- the dataframe
+    # model --- the formula for fitted models
+    # yname --- the column name of response
+    # K --- K fold cross-validation, default is 10
+    # random seed 
+    
+    n <- nrow(df)
+    set.seed(seed)
+    # response variable
+    Y = df[,yname] 
+    # partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    # generate indices 1:10 and sample n of them  
+    
+    # K fold cross-validated metrics
+    F1_score = NULL
+    Accuracy = NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] #test data
+      train.index <- seq_len(n)[(s != i)] #training data
+      
+      # model with training data
+      logistic.fit = glm(model, data = df[train.index,], family = 'binomial')
+      # observed test set y
+      logistic.y <- df[test.index, yname]
+      # predicted test set y
+      logistic.pred = predict(logistic.fit, df[test.index,], type = 'response')
+      if (yname == "total_cat") {
+         logistic.pred[logistic.pred > .5] = "total>1200"
+         logistic.pred[logistic.pred < .5] = "total<1200" 
+         # logistic.y <- factor(logistic.y, levels = c("total<1200", "total>1200"))
+         logistic.pred <- factor(logistic.pred, levels = c("total<1200", "total>1200"))
+      } else {
+         logistic.pred[logistic.pred > .5] = "expected_tot>650"
+         logistic.pred[logistic.pred < .5] = "expected_tot<650"
+         # logistic.y <- factor(logistic.y, levels = c("expected_tot<650", "expected_tot>650"))
+         logistic.pred <- factor(logistic.pred, levels = c("expected_tot<650", "expected_tot>650"))
+      }
+      
+      # Confusion matrix
+      t <- confusionMatrix(logistic.pred, 
+                           logistic.y, mode="prec_recall") 
+      
+      f1 <- t$byClass["F1"]
+      accuracy <- t$byClass["Balanced Accuracy"]
+
+      F1_score = c(F1_score, f1)
+      Accuracy = c(Accuracy, accuracy)
+    }
+    
+    # Output
+    list(call = model, 
+         K = K, 
+         F1_score = mean(F1_score),
+         Accuracy = mean(Accuracy), 
+         seed = seed)
+  }
+
+
+logistic_total_pred <-  cv.logistic(md_data_3_m.1, model = total_cat ~ ., 
+                                    yname = "total_cat", K = 10, seed = 2020)
+logistic_exptot_pred <- cv.logistic(md_data_3_m.2, model = exptot_cat ~ ., 
+                                    yname = "exptot_cat", K = 10, seed = 2020)
+```
+model coefficients of logistic regression
+```{r}
+# total 
+summary(glm(total_cat ~ .,data = md_data_3_m.1, family = 'binomial'))
+
+# exptot
+summary(glm(exptot_cat ~ ., data = md_data_3_m.2,family = 'binomial'))
+```
+
+Build R function for K-fold Cross-Validated error for LDA
+```{r}
+cv.lda <-
+  function (df, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020) {
+    
+    # Arguments:
+    # df --- the dataframe
+    # model --- the formula for fitted models
+    # yname --- the column name of response
+    # K --- K fold cross-validation, default is 10
+    # random seed 
+    
+    n <- nrow(df)
+    set.seed(seed)
+    # response variable
+    Y = df[,yname] 
+    # partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    # generate indices 1:10 and sample n of them  
+    
+    # K fold cross-validated metrics
+    F1_score = NULL
+    Accuracy = NULL
+
+    for (i in 1:K) {
+      test.index <- seq_len(n)[(s == i)]  # test data
+      train.index <- seq_len(n)[(s != i)] # training data
+      
+      # model with training data
+      lda.fit = lda(model, data = df[train.index,])
+      
+      # observed test set y
+      lda.y <- df[test.index, yname]
+      # predicted test set y
+      lda.pred = predict(lda.fit, df[test.index,])
+      
+      # Confusion matrix
+      t <- confusionMatrix(lda.pred$class, lda.y, mode="prec_recall") 
+      
+      f1 <- t$byClass["F1"]
+      accuracy <- t$byClass["Balanced Accuracy"]
+
+      F1_score = c(F1_score, f1)
+      Accuracy = c(Accuracy, accuracy)
+      
+    }
+    
+    # Output
+    list(call = model, 
+         K = K, 
+         F1_score = mean(F1_score),
+         Accuracy = mean(Accuracy), 
+         seed = seed)  
+  }
+
+lda_total_pred <-  cv.lda(md_data_3_m.1,  model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020)
+lda_exptot_pred <-  cv.lda(md_data_3_m.2,  model = exptot_cat ~ ., yname = "exptot_cat", K = 10, seed = 2020)
+
+```
+model coefficients of LDA 
+```{r}
+# total 
+lda(total_cat ~ ., data = md_data_3_m.1)
+
+# exptot
+lda(exptot_cat ~ ., data = md_data_3_m.2)
+```
+
+
+
+Build R function for K-fold Cross-Validated error for QDA
+```{r}
+cv.qda <-
+  function (df, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020) {
+    
+    # Arguments:
+    # df --- the dataframe
+    # model --- the formula for fitted models
+    # yname --- the column name of response
+    # K --- K fold cross-validation, default is 10
+    # random seed 
+    
+    n <- nrow(df)
+    set.seed(seed)
+    # response variable
+    Y = df[,yname] 
+    # partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    # generate indices 1:10 and sample n of them  
+    
+    # K fold cross-validated metrics
+    F1_score = NULL
+    Accuracy = NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] # test data
+      train.index <- seq_len(n)[(s != i)] # training data
+      
+      # model with training data
+      qda.fit = qda(model, data = df[train.index,])
+      
+      # observed test set y
+      qda.y <- df[test.index, yname]
+      
+      # predicted test set y
+      qda.pred = predict(qda.fit, df[test.index,])$class
+      
+      # Confusion matrix
+      t <- confusionMatrix(qda.pred, qda.y, mode="prec_recall") 
+      
+      f1 <- t$byClass["F1"]
+      accuracy <- t$byClass["Balanced Accuracy"]
+
+      F1_score = c(F1_score, f1)
+      Accuracy = c(Accuracy, accuracy)
+    }
+    # Output
+    list(call = model, 
+         K = K, 
+         F1_score = mean(F1_score),
+         Accuracy = mean(Accuracy), 
+         seed = seed)   
+  }
+
+
+qda_total_pred<-  cv.qda(md_data_3_m.1, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020)
+qda_exptot_pred <- cv.qda(md_data_3_m.2, model = exptot_cat ~ ., yname = "exptot_cat", K = 10, seed = 2020)
+
+```
+model coefficients of QDA 
+```{r}
+# total 
+qda(total_cat ~ ., data = md_data_3_m.1)
+
+# exptot
+qda(exptot_cat ~ ., data = md_data_3_m.2)
+```
+
+
+### Comparing The Results
+```{r}
+
+`Test Accuracy` <- c(logistic_total_pred$Accuracy, lda_total_pred$Accuracy, qda_total_pred$Accuracy,
+                   logistic_exptot_pred$Accuracy, lda_exptot_pred$Accuracy, qda_exptot_pred$Accuracy) %>% round(3)
+
+`Test F1 Score` <- c(logistic_total_pred$F1_score, lda_total_pred$F1_score, qda_total_pred$F1_score,
+                   logistic_exptot_pred$F1_score, lda_exptot_pred$F1_score, qda_exptot_pred$F1_score) %>%
+round(3)
+
+`Response Variable` <- c('total','total','total','exptot','exptot', 'exptot')
+`Modelling Approach`<- c('LR', 'LDA', 'QDA','LR', 'LDA', 'QDA')
+  
+table <- rbind(`Modelling Approach`, `Response Variable`, `Test Accuracy`, `Test F1 Score`)
+kable(table,booktabs = T,align = "c")%>%kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+
+data.frame(table) %>% rownames_to_column() %>% write_csv('Classification Results.csv')
+
+
+```
+
+### re-fit after anomaly detection
+```{r}
+
+pc_Outliers <- read.csv("pc_Outliers.csv")
+colnames(pc_Outliers)[1] <- c('ROMS ID')
+romsid <- pc_Outliers$`ROMS ID`
+
+```
+
+```{r include=F}
+md_data_new_4 <- md_data_new_1 %>% dplyr::filter(`ROMS ID` %in% romsid) %>%
+  dplyr::mutate(total_cat = 
+           dplyr::if_else(total < 1200, "total<1200", "total>1200")) %>% 
+  dplyr::select(-total) %>%
+  dplyr::mutate(exptot_cat = 
+           dplyr::if_else(expected_tot < 650, "expected_tot<650", "expected_tot>650")) %>% 
+  dplyr::select(-expected_tot)
+  
+md_data_new_4 %<>% 
+  dplyr::mutate(total_cat = factor(total_cat,
+                                   levels = c("total<1200", "total>1200"))) %<>%
+  dplyr::mutate(exptot_cat = factor(exptot_cat,
+                                   levels = c("expected_tot<650", "expected_tot>650")))
+
+# Data preparation
+bd_region <- dummy(md_data_new_4$body_region)
+surgical <- dummy(md_data_new_4$Surgical)
+payer <- dummy(md_data_new_4$PayerCategory)
+weeks_to_treat <- dummy(md_data_new_4$weeks_to_treat_cat)
+weeks_to_smsend <- dummy(md_data_new_4$weeks_to_smsend_cat)
+outcomect <- dummy(md_data_new_4$outcome_ct)
+md_data_4_m <- md_data_new_4 %>% dplyr::select(-body_region, -Surgical, -PayerCategory, -weeks_to_treat_cat,
+                                     -weeks_to_smsend_cat, -outcome_ct, -int_sur_payer)
+md_data_4_m <- cbind(md_data_4_m, bd_region, surgical, payer, weeks_to_treat, weeks_to_smsend, outcomect)
+rm(bd_region, surgical, payer, weeks_to_treat, weeks_to_smsend, outcomect)
+
+md_data_4_m.1 <- md_data_4_m %>% dplyr::select(-`ROMS ID`, -exptot_cat) # predict total
+md_data_4_m.2 <- md_data_4_m %>% dplyr::select(-`ROMS ID`, -total_cat) # predict exp_tot
+
+
+```
+
+```{r}
+cv.logistic <-
+  function (df, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020) {
+    
+    # Arguments:
+    # df --- the dataframe
+    # model --- the formula for fitted models
+    # yname --- the column name of response
+    # K --- K fold cross-validation, default is 10
+    # random seed 
+    
+    n <- nrow(df)
+    set.seed(seed)
+    # response variable
+    Y = df[,yname] 
+    # partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    # generate indices 1:10 and sample n of them  
+    
+    # K fold cross-validated metrics
+    F1_score = NULL
+    Accuracy = NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] #test data
+      train.index <- seq_len(n)[(s != i)] #training data
+      
+      # model with training data
+      logistic.fit = glm(model, data = df[train.index,], family = 'binomial')
+      # observed test set y
+      logistic.y <- df[test.index, yname]
+      # predicted test set y
+      logistic.pred = predict(logistic.fit, df[test.index,], type = 'response')
+      if (yname == "total_cat") {
+         logistic.pred[logistic.pred > .5] = "total>1200"
+         logistic.pred[logistic.pred < .5] = "total<1200" 
+         # logistic.y <- factor(logistic.y, levels = c("total<1200", "total>1200"))
+         logistic.pred <- factor(logistic.pred, levels = c("total<1200", "total>1200"))
+      } else {
+         logistic.pred[logistic.pred > .5] = "expected_tot>650"
+         logistic.pred[logistic.pred < .5] = "expected_tot<650"
+         # logistic.y <- factor(logistic.y, levels = c("expected_tot<650", "expected_tot>650"))
+         logistic.pred <- factor(logistic.pred, levels = c("expected_tot<650", "expected_tot>650"))
+      }
+      
+      # Confusion matrix
+      t <- confusionMatrix(logistic.pred, 
+                           logistic.y, mode="prec_recall") 
+      
+      f1 <- t$byClass["F1"]
+      accuracy <- t$byClass["Balanced Accuracy"]
+
+      F1_score = c(F1_score, f1)
+      Accuracy = c(Accuracy, accuracy)
+    }
+    
+    # Output
+    list(call = model, 
+         K = K, 
+         F1_score = mean(F1_score),
+         Accuracy = mean(Accuracy), 
+         seed = seed)
+  }
+
+
+logistic_total_pred <-  cv.logistic(md_data_4_m.1, model = total_cat ~ ., 
+                                    yname = "total_cat", K = 10, seed = 2020)
+logistic_exptot_pred <- cv.logistic(md_data_4_m.2, model = exptot_cat ~ ., 
+                                    yname = "exptot_cat", K = 10, seed = 2020)
+```
+
+
+```{r}
+cv.lda <-
+  function (df, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020) {
+    
+    # Arguments:
+    # df --- the dataframe
+    # model --- the formula for fitted models
+    # yname --- the column name of response
+    # K --- K fold cross-validation, default is 10
+    # random seed 
+    
+    n <- nrow(df)
+    set.seed(seed)
+    # response variable
+    Y = df[,yname] 
+    # partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    # generate indices 1:10 and sample n of them  
+    
+    # K fold cross-validated metrics
+    F1_score = NULL
+    Accuracy = NULL
+
+    for (i in 1:K) {
+      test.index <- seq_len(n)[(s == i)]  # test data
+      train.index <- seq_len(n)[(s != i)] # training data
+      
+      # model with training data
+      lda.fit = lda(model, data = df[train.index,])
+      
+      # observed test set y
+      lda.y <- df[test.index, yname]
+      # predicted test set y
+      lda.pred = predict(lda.fit, df[test.index,])
+      
+      # Confusion matrix
+      t <- confusionMatrix(lda.pred$class, lda.y, mode="prec_recall") 
+      
+      f1 <- t$byClass["F1"]
+      accuracy <- t$byClass["Balanced Accuracy"]
+
+      F1_score = c(F1_score, f1)
+      Accuracy = c(Accuracy, accuracy)
+      
+    }
+    
+    # Output
+    list(call = model, 
+         K = K, 
+         F1_score = mean(F1_score),
+         Accuracy = mean(Accuracy), 
+         seed = seed)  
+  }
+
+lda_total_pred <-  cv.lda(md_data_4_m.1,  model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020)
+lda_exptot_pred <-  cv.lda(md_data_4_m.2,  model = exptot_cat ~ ., yname = "exptot_cat", K = 10, seed = 2020)
+```
+
+```{r}
+cv.qda <-
+  function (df, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020) {
+    
+    # Arguments:
+    # df --- the dataframe
+    # model --- the formula for fitted models
+    # yname --- the column name of response
+    # K --- K fold cross-validation, default is 10
+    # random seed 
+    
+    n <- nrow(df)
+    set.seed(seed)
+    # response variable
+    Y = df[,yname] 
+    # partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    # generate indices 1:10 and sample n of them  
+    
+    # K fold cross-validated metrics
+    F1_score = NULL
+    Accuracy = NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] # test data
+      train.index <- seq_len(n)[(s != i)] # training data
+      
+      # model with training data
+      qda.fit = qda(model, data = df[train.index,])
+      
+      # observed test set y
+      qda.y <- df[test.index, yname]
+      
+      # predicted test set y
+      qda.pred = predict(qda.fit, df[test.index,])$class
+      
+      # Confusion matrix
+      t <- confusionMatrix(qda.pred, qda.y, mode="prec_recall") 
+      
+      f1 <- t$byClass["F1"]
+      accuracy <- t$byClass["Balanced Accuracy"]
+
+      F1_score = c(F1_score, f1)
+      Accuracy = c(Accuracy, accuracy)
+    }
+    # Output
+    list(call = model, 
+         K = K, 
+         F1_score = mean(F1_score),
+         Accuracy = mean(Accuracy), 
+         seed = seed)   
+  }
+
+
+qda_total_pred<-  cv.qda(md_data_4_m.1, model = total_cat ~ ., yname = "total_cat", K = 10, seed = 2020)
+qda_exptot_pred <- cv.qda(md_data_4_m.2, model = exptot_cat ~ ., yname = "exptot_cat", K = 10, seed = 2020)
+
+```
+
+
+```{r}
+c1<- c(logistic_total_pred$Accuracy,lda_total_pred$Accuracy,qda_total_pred$Accuracy)
+c2 <- c(logistic_total_pred$F1_score,lda_total_pred$F1_score,qda_total_pred$F1_score)
+result_total_classification <-rbind(c1, c2)
+colnames(result_total_classification) <- c('LR', 'LDA' ,'QDA')
+rownames(result_total_classification) <- c('Accuracy', 'F1')
+write_csv(data.frame(result_total_classification), 'result_total_classification.csv')
+```
+
+```{r}
+c1<- c(logistic_exptot_pred$Accuracy,lda_exptot_pred$Accuracy,qda_exptot_pred$Accuracy)
+c2 <- c(logistic_exptot_pred$F1_score,lda_exptot_pred$F1_score,qda_exptot_pred$F1_score)
+result1_exptot_classification <-rbind(c1, c2)
+colnames(result1_exptot_classification) <- c('LR', 'LDA' ,'QDA')
+rownames(result1_exptot_classification) <- c('Accuracy', 'F1')
+write_csv(data.frame(result1_exptot_classification), 'result_exptot_classification.csv')
+```
+
+
+
+
+
+
+

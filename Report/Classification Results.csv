@@ -1,0 +1,5 @@
+rowname,X1,X2,X3,X4,X5,X6
+Modelling Approach,LR,LDA,QDA,LR,LDA,QDA
+Response Variable,total,total,total,exptot,exptot,exptot
+Test Accuracy,0.594,0.592,0.587,0.598,0.598,0.581
+Test F1 Score,0.504,0.5,0.556,0.606,0.607,0.603

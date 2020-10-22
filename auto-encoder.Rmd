@@ -1,0 +1,437 @@
+---
+title: "Using Number of Visits"
+date: "5/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("preprocessing3.R")
+source("functions.R")
+#devtools::install_github("rstudio/keras")
+#install.packages("tensorflow")
+library(keras)
+library(magrittr)
+library(dummies)
+library(factoextra)
+```
+
+```{r}
+ggplot(md_data_new_1,aes(x = Visits,y = total,color = body_region)) + geom_point() + facet_wrap(~body_region,ncol = 4) + geom_smooth(method = "lm",formula = 'y ~ x',se = F) + theme(legend.position = "")
+```
+
+The cost is basically linear to the Visits
+
+## Basic lm
+
+```{r}
+
+basic_lm <- lm(log(total) ~ log(Visits) + body_region + Outcome, data = md_data_new_1)
+summary(basic_lm)
+plot(basic_lm,which = 1)
+plot(basic_lm,which = 2)
+lm_coef <- coef(basic_lm)
+x <- 1:80
+y <- exp(lm_coef[1]) * x^(lm_coef[2])
+
+ggplot() + geom_point(data = md_data_new_1, aes(x = Visits,y = total,color = body_region)) + 
+  geom_smooth(data = md_data_new_1, aes(x = Visits,y = total,color = body_region),method = "lm",se = F)+
+  geom_text(data = md_data_new_1, aes(x = Visits,y = total,color = body_region,label = `ROMS ID`))
+```
+
+`ROMS ID` 2154,1142,3131,1048,1375,3018,1386,2812,1064,1762,2622,2146,1446,3129,994,874,983 are outliers
+
+
+
+## Use Gaussian Mixture
+
+```{r}
+library(mclust)
+
+all_data <- md_data_new_1 %>% 
+  dplyr::select(Visits, total) %>% as.matrix()
+
+all_data <- scale(all_data)
+col_mean_train <- attr(all_data,"scaled:center")
+col_sdev_train <- attr(all_data,"scaled:scale")
+em_data <- densityMclust(all_data,G = 1,modelNames = "VVV")
+
+#plot(predict(em_data,newdata = anomaly_data, what = "dens"))
+md_data_new_1$Outlier <- em_data$density<0.00001
+
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = Outlier)) + geom_point() + labs(title = "Initial Clustering")
+ggsave("Inital.png",dpi = 300)
+
+
+x = seq(0,80,by = 1)
+y = seq(0,16000,by = 100)
+
+
+grid <- expand.grid(x,y) %>% rename("Visits" = "Var1",
+                                    "total" = "Var2")
+grid_scale <- scale(grid %>% as.matrix(),center = col_mean_train,scale = col_sdev_train)
+
+GM_pred <- predict.densityMclust(em_data,newdata = grid_scale,what = "dens")
+grid$Outlier <- GM_pred<0.00001
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+ggsave("Inital_DB.png",dpi = 300)
+```
+
+## Start the iteration
+
+```{r}
+anomaly_index <- em_data$density<0.00001
+train_data <- all_data[!anomaly_index, ]
+
+
+
+autoencoder <- keras_model_sequential()
+
+inputdim = ncol(train_data)
+
+autoencoder %>% layer_dense(input_shape = inputdim, units = 1,
+              #activity_regularizer = keras::regularizer_l1(l = 0.1),
+              activation = "relu") %>%
+  layer_dense(unit = inputdim)
+
+summary(autoencoder)
+
+autoencoder %>% compile(
+  optimizer = optimizer_rmsprop(),
+  loss = "mse",
+  metrics = list("mean_absolute_error")
+)
+
+
+```
+
+```{r}
+autoencoder %>% fit(
+  train_data,
+  train_data,
+  epochs = 400,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = callback_early_stopping(monitor = "val_loss",restore_best_weights = TRUE,patience = 10)
+)
+```
+
+```{r}
+autoencoder_pred_all <- autoencoder %>% predict(all_data)
+plot(apply((autoencoder_pred_all - all_data)^2,1,mean))
+clust_label <- apply((autoencoder_pred_all - all_data)^2,1,mean) > 3 * sd(apply((autoencoder_pred_all - all_data)^2,1,mean))
+md_data_new_1$Outlier <- clust_label
+
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Second Clustering")
+ggsave("second.png",dpi = 300)
+```
+
+```{r}
+
+
+grid_pred <- autoencoder %>% predict(grid_scale)
+grid_label <- apply((grid_pred - grid_scale)^2,1,mean) > 3 * sd(apply((autoencoder_pred_all - all_data)^2,1,mean))
+grid$Outlier <- grid_label
+
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+ggsave("second_DB.png",dpi = 300)
+
+```
+
+```{r}
+save(col_mean_train,col_sdev_train,file = "Preprocessing.Rdata")
+autoencoder %>% save_model_tf("autoencoder")
+
+write_csv(md_data_new_1 %>% select(`ROMS ID`,Visits,total,Outlier),"Outliers.csv")
+
+```
+
+## Second Round
+
+```{r}
+
+normal_1 <- all_data[!clust_label, ]
+
+train_data <- normal_1
+
+
+autoencoder <- keras_model_sequential()
+
+inputdim = ncol(train_data)
+
+autoencoder %>% layer_dense(input_shape = inputdim, units = 1,
+              #activity_regularizer = keras::regularizer_l1(),
+              activation = "sigmoid") %>%
+  layer_dense(unit = inputdim)
+
+summary(autoencoder)
+
+autoencoder %>% compile(
+  optimizer = optimizer_rmsprop(),
+  loss = "mse",
+  metrics = list("mean_absolute_error")
+)
+
+
+```
+
+```{r}
+autoencoder %>% fit(
+  train_data,
+  train_data,
+  epochs = 400,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = callback_early_stopping(monitor = "val_loss",restore_best_weights = TRUE,patience = 10)
+)
+```
+
+```{r}
+autoencoder_pred_all <- autoencoder %>% predict(all_data)
+plot(apply((autoencoder_pred_all - all_data)^2,1,mean))
+clust_label <- apply((autoencoder_pred_all - all_data)^2,1,mean) > 3 * sd(apply((autoencoder_pred_all - all_data)^2,1,mean))
+md_data_new_1$Outlier <- clust_label
+
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Third Clustering")
+```
+
+```{r}
+
+
+grid_pred <- autoencoder %>% predict(grid_scale)
+grid_label <- apply((grid_pred - grid_scale)^2,1,mean) > 3 * sd(apply((autoencoder_pred_all - all_data)^2,1,mean))
+grid$Outlier <- grid_label
+
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+
+```
+
+## Third
+
+```{r}
+
+normal_1 <- all_data[!clust_label, ]
+
+train_data <- normal_1
+
+
+autoencoder <- keras_model_sequential()
+
+inputdim = ncol(train_data)
+
+autoencoder %>% layer_dense(input_shape = inputdim, units = 1,
+              #activity_regularizer = keras::regularizer_l1(l = 0.1),
+              activation = "relu") %>%
+  layer_dense(unit = inputdim)
+
+summary(autoencoder)
+
+autoencoder %>% compile(
+  optimizer = optimizer_rmsprop(),
+  loss = "mse",
+  metrics = list("mean_absolute_error")
+)
+
+
+```
+
+```{r}
+autoencoder %>% fit(
+  train_data,
+  train_data,
+  epochs = 400,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = callback_early_stopping(monitor = "val_loss",restore_best_weights = TRUE,patience = 10)
+)
+```
+
+```{r}
+autoencoder_pred_all <- autoencoder %>% predict(all_data)
+plot(apply((autoencoder_pred_all - all_data)^2,1,mean))
+clust_label <- apply((autoencoder_pred_all - all_data)^2,1,mean) > 0.8
+md_data_new_1$Outlier <- clust_label
+
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Fourth Clustering")
+```
+
+```{r}
+
+
+grid_pred <- autoencoder %>% predict(grid_scale)
+grid_label <- apply((grid_pred - grid_scale)^2,1,mean) > 0.8
+grid$Outlier <- grid_label
+
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+
+```
+
+## 4th
+
+```{r}
+
+normal_1 <- all_data[!clust_label, ]
+
+train_data <- normal_1
+
+
+autoencoder <- keras_model_sequential()
+
+inputdim = ncol(train_data)
+
+autoencoder %>% layer_dense(input_shape = inputdim, units = 1,
+              activity_regularizer = keras::regularizer_l1(),
+              activation = "relu") %>%
+  layer_dense(unit = inputdim)
+
+summary(autoencoder)
+
+autoencoder %>% compile(
+  optimizer = optimizer_rmsprop(),
+  loss = "mse",
+  metrics = list("mean_absolute_error")
+)
+
+
+```
+
+```{r}
+autoencoder %>% fit(
+  train_data,
+  train_data,
+  epochs = 400,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = callback_early_stopping(monitor = "val_loss",restore_best_weights = TRUE,patience = 10)
+)
+```
+
+```{r}
+autoencoder_pred_all <- autoencoder %>% predict(all_data)
+plot(apply((autoencoder_pred_all - all_data)^2,1,mean))
+clust_label <- apply((autoencoder_pred_all - all_data)^2,1,mean) > 0.8
+md_data_new_1$Outlier <- clust_label
+
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Fifth Clustering")
+```
+## interpret the result
+
+```{r}
+
+
+grid_pred <- autoencoder %>% predict(grid_scale)
+grid_label <- apply((grid_pred - grid_scale)^2,1,mean) > 0.8
+grid$Outlier <- grid_label
+
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+
+```
+
+## Try pca
+
+```{r}
+anomaly_index <- em_data$density<0.00001
+train_data <- all_data[!anomaly_index, ]
+
+
+```
+
+```{r}
+pc <- princomp(train_data,cor = F)
+summary(pc)
+plot(pc)
+
+scores <- pc$scores
+
+test_scores <- train_data %*% pc$loadings[ ,1]
+
+loading_t <- t(pc$loadings[, 1])
+
+
+reconstruct <- test_scores %*% loading_t
+
+plot(reconstruct[ ,1],reconstruct[ ,2],"l",col = "blue")
+points(train_data)
+
+recon_error <- apply((train_data - reconstruct)^2,1,mean)
+
+sum(recon_error > 0.21)
+
+plot(train_data[ ,1],recon_error)
+
+test_outlier <- all_data %*% pc$loadings[ ,1] %*% loading_t
+
+
+recon_error_outlier <- apply((all_data - test_outlier)^2,1,mean)
+sd_recon <- sd(recon_error_outlier)
+sum(recon_error_outlier > 2*sd_recon)
+md_data_new_1$pc_outlier <- recon_error_outlier > 2*sd_recon
+
+write_csv(md_data_new_1 %>% select(`ROMS ID`,Visits,total,pc_outlier),"pc_Outliers.csv")
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = pc_outlier)) + 
+  geom_point()+
+  labs(color = "Outlier",title = "1st PCA iteration")
+ggsave("PCA_1st.png",dpi = 300)
+
+grid_pred <- grid_scale %*% pc$loadings[ ,1] %*% loading_t
+grid_label <- apply((grid_pred - grid_scale)^2,1,mean) > 2*sd_recon
+grid$Outlier <- grid_label
+
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+ggsave("PCA_1st_DB.png",dpi = 300)
+```
+
+```{r}
+train_data <- all_data[!md_data_new_1$pc_outlier, ]
+
+
+```
+
+```{r}
+pc <- princomp(train_data,cor = F)
+summary(pc)
+plot(pc)
+
+scores <- pc$scores
+
+test_scores <- train_data %*% pc$loadings[ ,1]
+
+loading_t <- t(pc$loadings[, 1])
+
+
+reconstruct <- test_scores %*% loading_t
+
+plot(reconstruct[ ,1],reconstruct[ ,2],"l",col = "blue")
+points(train_data)
+
+recon_error <- apply((train_data - reconstruct)^2,1,mean)
+
+sum(recon_error > 0.21)
+
+plot(train_data[ ,1],recon_error)
+
+test_outlier <- all_data %*% pc$loadings[ ,1] %*% loading_t
+
+
+recon_error_outlier <- apply((all_data - test_outlier)^2,1,mean)
+sd_recon <- sd(recon_error_outlier)
+sum(recon_error_outlier > 2*sd_recon)
+md_data_new_1$pc_outlier <- recon_error_outlier > 2*sd_recon
+
+ggplot(md_data_new_1,aes(x = Visits, y = total, color = pc_outlier)) + geom_point()+
+  labs(color = "Outlier",title = "2nd PCA iteration")
+ggsave("PCA_2nd.png",dpi = 300)
+
+grid_pred <- grid_scale %*% pc$loadings[ ,1] %*% loading_t
+grid_label <- apply((grid_pred - grid_scale)^2,1,mean) > 2*sd_recon
+grid$Outlier <- grid_label
+
+ggplot(grid,aes(x = Visits, y = total, color = Outlier)) + geom_point()+ labs(title = "Decision Boundary")
+ggsave("PCA_2nd_DB.png",dpi = 300)
+```
+
+

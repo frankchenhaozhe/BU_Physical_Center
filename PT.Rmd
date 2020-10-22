@@ -1,0 +1,203 @@
+---
+title: "PT project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(esquisse, caret, glmnet, arm, boot, dplyr, magrittr)
+source('preprocessing(1).R')
+```
+
+## 1. Predicting the total cost
+### Simple GLM
+```{r warning=F}
+
+set.seed(2020)
+
+# function of calculating mse
+check_mse <- function(model,train, test) {
+  
+  # test mse 
+  p1 = predict(object = model, newdata = test)
+  mse1 = mean((p1 - train$total)^2)
+ 
+   # train mse 
+  p2 = predict(object = model, newdata = train)
+  mse2 = mean((p2 - train$total)^2)
+  
+  # print out the mes
+  cat( '\nThe testing MSE is:' ,as.numeric(mse1) )
+  cat( '\nThe training MSE is:' ,as.numeric(mse2) )
+}
+
+# split the data into training set and testing set
+subset = sample(nrow(md_data), nrow(md_data) * 0.8)
+train_md_data = md_data[subset, ]
+test_md_data = md_data[-subset, ]
+
+
+# fit the original model to md_data
+model0 <- lm(total ~. ,data = md_data[-1])
+summary(model0)
+# check the mse 
+check_mse(model0, train_md_data, test_md_data)
+plot(model0)
+
+```
+
+```{r}
+# There may have different levels of cats in certain variable when applying 
+# different training and testing sets
+# so convert cats to dummy variables, store it as 'md_data_dummy'
+# unique(md_data$body_region)
+# unique(md_data$Surgical)
+# unique(md_data$PayerCategory)
+
+md_data_dummy <- md_data %>% 
+  mutate(
+         body_foot_ankle = if_else(body_region == "foot/ankle" , 1, 0),
+         body_lumbar = if_else(body_region == "lumbar" , 1, 0),
+         body_knee = if_else(body_region == "knee" , 1, 0),
+         body_shoulder = if_else(body_region == "shoulder" , 1, 0),
+         body_thoracic = if_else(body_region == "thoracic" , 1, 0),
+         body_hip = if_else(body_region == "hip" , 1, 0),
+         body_cervical = if_else(body_region == "cervical" , 1, 0),
+         body_other = if_else(body_region == "other" , 1, 0),
+         Conservative = if_else(Surgical == "Conservative" , 1, 0),
+         Surgical = if_else(Surgical == "Surgical" , 1, 0),
+         Surgical_Non_Specific = if_else(Surgical == "Non-Specific" , 1, 0),
+         payercat_other = if_else(PayerCategory == "Other" , 1, 0),
+         payercat_BCBS = if_else(PayerCategory == "`Blue Cross Blue Shield`" , 1, 0),
+         payercat_Aetna = if_else(PayerCategory == "Aetna" , 1, 0),
+         payercat_Medicare = if_else(PayerCategory == "Medicare" , 1, 0)
+         ) 
+
+md_data_dummy %<>% dplyr::select(-body_region, -Surgical, -PayerCategory) # eliminate useless columns
+md_data_dummy %<>% dplyr::mutate(total = log(total), expected_tot = log(expected_tot)) # log transformation of outcomes
+
+```
+
+```{r warning=FALSE}
+
+# split the data into training set and testing set
+subset = sample(nrow(md_data_dummy), nrow(md_data_dummy) * 0.8)
+train_md_data_dummy = md_data_dummy[subset, ]
+test_md_data_dummy = md_data_dummy[-subset, ]
+
+# fit linear model
+model1 <- lm(total~.  ,data = train_md_data_dummy[-1])
+summary(model1)
+# check the mse
+check_mse(model1, train_md_data_dummy, test_md_data_dummy)
+
+
+## cross validation, 
+## There is still problem after dummize variables
+## The cvmodel$delta[2] turns out to be NA, how to deal with this problem?
+## how to solve this problems? 
+cvmodel <- cv.glm(data = md_data_dummy, glmfit = model1, K = 5)
+cat( '\nThe cv MSE is:' ,as.numeric(cvmodel$delta[2]) ) 
+
+```
+
+```{r warning=F}
+
+# take a look at the distributions of variables
+# hist(md_data_dummy$weeks_to_treat)
+# hist(md_data_dummy$weeks_to_smsend)
+# hist(md_data_dummy$expected_tot)
+# hist(md_data_dummy$admin_pain)
+# hist(md_data_dummy$admin_score)
+# Standardize certain continuous independent variables
+# then try another model
+std_col <- c('weeks_to_treat', 'weeks_to_smsend')
+std_obj <- preProcess(x = train_md_data_dummy[, colnames(md_data_dummy) %in% std_col],
+                      method = c("center", "scale"))
+
+train_std_data <- predict(std_obj, train_md_data_dummy)
+test_std_data <- predict(std_obj, test_md_data_dummy)
+
+model2 <- lm(total~. ,data = train_std_data[-1])
+summary(model2)
+check_mse(model2, train_std_data, test_std_data)
+
+```
+
+## Reguarlization
+```{r}
+
+# Get the data into a compatible format
+X_train <- sparse.model.matrix(~ Sex+body_region + Surgical + PayerCategory + outcome_ct + weeks_to_treat + weeks_to_smsend + admin_pain + admin_score + Age + Chronic_Pain + expected_tot, train_std_data)
+# drop the expected total
+X_train1 <- model.matrix(~ Sex+body_region + Surgical + PayerCategory + outcome_ct + weeks_to_treat + weeks_to_smsend + admin_pain + admin_score + Age + Chronic_Pain, train_std_data)
+
+y_train <- as.matrix(train_std_data[, 'total'])
+  
+X_test <- sparse.model.matrix(~ Sex+body_region + Surgical + PayerCategory + outcome_ct + weeks_to_treat + weeks_to_smsend + admin_pain + admin_score + Age + Chronic_Pain + expected_tot, test_std_data)
+# drop the expected total
+X_test1 <- model.matrix(~ Sex + body_region + Surgical + PayerCategory + outcome_ct + weeks_to_treat + weeks_to_smsend + admin_pain + admin_score + Age + Chronic_Pain, test_std_data)
+
+y_test <- as.matrix(test_std_data[, 'total'])
+
+```
+
+### 1.1 Hyper-parameter Tuning
+```{r}
+# Choosing a lambda for Lasso Regression
+# The alpha value is 1 for lasso regression
+cv_lasso <- cv.glmnet(X_train, y_train, alpha = 1, type.measure = "mse", nfolds = 5)
+plot(cv_lasso)
+plot(cv_lasso$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_lasso$lambda.min)
+coef(cv_lasso)
+# almost all effects of other variables were abosored by the expected_total
+# it is obviously a good predictor for the total cost, we keep it in the model for later modelling
+
+# refit lasso by dropping expected_total
+cv_lasso1 <- cv.glmnet(X_train1, y_train, alpha = 1, type.measure = "mse", nfolds = 5)
+plot(cv_lasso1)
+plot(cv_lasso1$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_lasso1$lambda.min)
+coef(cv_lasso1)
+
+# Choosing a lambda for Ridge Regression
+# The alpha value is 0 for ridge regression
+cv_ridge <- cv.glmnet(X_train, y_train, alpha = 0, type.measure = "mse", nfolds = 5)
+plot(cv_ridge)
+plot(cv_ridge$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_ridge$lambda.min)
+coef(cv_ridge)
+
+# again refit the model by dropping expected_total
+cv_ridge1 <- cv.glmnet(X_train1, y_train, alpha = 0, type.measure = "mse", nfolds = 5)
+plot(cv_ridge1)
+plot(cv_ridge1$glmnet.fit, xvar="lambda", label=TRUE)
+print(cv_ridge1$lambda.min)
+coef(cv_ridge1)
+
+```
+
+### 1.2 Building Model based on optimal lambda
+By using the optimal lambda values obtained above, we can build our ridge and lasso models
+```{r}
+
+lasso_model <- glmnet(X_train, y_train, lambda = cv_lasso$lambda.min, alpha = 1)
+coef(lasso_model)
+
+lasso_model1 <- glmnet(X_train1, y_train, lambda = cv_lasso1$lambda.min, alpha = 1)
+coef(lasso_model1)
+
+preds_lasso <- predict(lasso_model, X_test)
+preds_lasso1 <- predict(lasso_model1, X_test1)
+
+```
+
+
+
+
+
+
+
+
+
